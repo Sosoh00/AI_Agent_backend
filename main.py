@@ -15,7 +15,6 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print("Warning: MT5 failed to initialize", e)
     yield
-    mt5_service.shutdown()
     print("MT5 connection closed on shutdown")
 
 app = FastAPI(

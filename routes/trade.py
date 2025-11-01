@@ -9,9 +9,18 @@ router = APIRouter(prefix="/trade", tags=["Trade Operations"])
 
 @router.post("/open", response_model=TradeResponse)
 def open_trade(req: TradeRequest):
-
+    """
+        Open a new trade (buy/sell) for a specific symbol with given volume, SL, TP.
+    """
+    symbol = req.symbol.upper()
     try:
-        return mt5_service.open_trade(req.symbol, req.volume, req.order_type, req.sl, req.tp)
+        if not mt5_service.symbol_exists(symbol):
+            symbol = symbol + "m"  # try with .m suffix
+            if not mt5_service.symbol_exists(symbol):
+                raise HTTPException(status_code=404, detail=f"Symbol '{symbol}' not found on MT5")
+            
+        return mt5_service.open_trade(symbol, req.volume, req.order_type, req.sl, req.tp)
+    
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -21,10 +30,13 @@ def open_trade(req: TradeRequest):
 @router.post("/close", description="Close an existing open trade by ticket ID.")
 def close_trade(request: CloseTradeRequest):
     result = mt5_service.close_trade(request.ticket)
-    if not result["success"]:
-        raise HTTPException(status_code=400, detail=result["message"])
-    return result
-
+    #print(f'result: {result}')
+    if isinstance(result, ValueError):
+        raise HTTPException(status_code=404, detail=str(result))
+    return {
+        "status": "closed with success",
+        "data": result
+    }
 
 # -----------------------------
 # GET /trade/positions
@@ -35,7 +47,6 @@ def get_open_positions():
     if not positions:
         raise HTTPException(status_code=404, detail="No open positions found")
     return {"positions": positions, "total_positions": len(positions)}
-
 
 # -----------------------------
 # POST /trade/modify
@@ -48,9 +59,9 @@ def modify_trade(request: ModifyTradeRequest):
     return result
 
 # -----------------------------
-# POST /trade/cancel_order
+# POST /trade/cancel-order
 # -----------------------------
-@router.post("/cancel_order", description="Cancel a pending (not yet executed) order.")
+@router.post("/cancel-order", description="Cancel a pending (not yet executed) order.")
 def cancel_order(request: CancelOrderRequest):
     result = mt5_service.cancel_pending_order(request.order)
     if not result["success"]:

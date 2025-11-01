@@ -175,30 +175,72 @@ def get_open_positions():
         })
     return result
 
+
 def close_trade(ticket: int):
+    """
+    Close an open trade by its ticket ID.
+    """
+
     ensure_connection()
+
     position = mt5.positions_get(ticket=ticket)
     if not position:
-        return {"success": False, "message": f"No open position found for ticket {ticket}"}
-    pos = position[0]
-    order_type = mt5.ORDER_SELL if pos.type == 0 else mt5.ORDER_BUY
-    close_price = mt5.symbol_info_tick(pos.symbol).bid if pos.type == 0 else mt5.symbol_info_tick(pos.symbol).ask
+        return ValueError(f"No open position found for ticket {ticket}")
 
+    pos = position[0]
+
+    # Determine opposite order type for closing
+    if pos.type == mt5.POSITION_TYPE_BUY:
+        order_type = mt5.ORDER_TYPE_SELL
+    elif pos.type == mt5.POSITION_TYPE_SELL:
+        order_type = mt5.ORDER_TYPE_BUY
+    else:
+        raise ValueError("Unknown position type")
+
+    # Get latest price
+    symbol = pos.symbol
+    tick = mt5.symbol_info_tick(symbol)
+    if not tick:
+        raise ValueError(f"Failed to get tick data for {symbol}")
+
+    close_price = tick.bid if order_type == mt5.ORDER_TYPE_BUY else tick.ask
+
+    # Make sure the symbol is selected
+    if not mt5.symbol_select(symbol, True):
+        raise ValueError(f"Symbol {symbol} not available")
+
+    # Construct request (short comment)
     request = {
         "action": mt5.TRADE_ACTION_DEAL,
-        "symbol": pos.symbol,
+        "symbol": symbol,
         "volume": pos.volume,
         "type": order_type,
         "position": ticket,
         "price": close_price,
-        "deviation": 10,
+        "deviation": 20,
         "magic": 123456,
-        "comment": "Closed via API",
+        "comment": "API close",  # keep it short and ASCII only
+        "type_filling": mt5.ORDER_FILLING_FOK,
     }
+
     result = mt5.order_send(request)
+    if result is None:
+        raise ValueError(f"Trade close failed: {mt5.last_error()}")
+
     if result.retcode != mt5.TRADE_RETCODE_DONE:
-        return {"success": False, "message": f"Close failed: {result.comment}"}
-    return {"success": True, "message": f"Trade {ticket} closed successfully"}
+        raise ValueError(f"Failed to close trade: {result.comment} ({result.retcode})")
+
+    return {
+        "ticket": ticket,
+        "symbol": symbol,
+        "closed_price": close_price,
+        "volume": pos.volume,
+        "profit": pos.profit,
+        "time_closed": datetime.now().isoformat(),
+        "message": "success"
+    }
+
+
 
 def modify_trade(ticket: int, sl=None, tp=None, volume=None):
     ensure_connection()
