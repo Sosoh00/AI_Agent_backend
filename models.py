@@ -22,7 +22,6 @@ class Token(Base):
     owner = relationship("User", back_populates="tokens")
 
 
-
 class TokenCreate(BaseModel):
     username: str
     name: str = "n8n_token"  # optional label for token
