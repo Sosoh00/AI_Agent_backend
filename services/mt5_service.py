@@ -1,9 +1,12 @@
+from unittest import result
 import MetaTrader5 as mt5
 from datetime import datetime, timezone
 import pandas as pd
 from dotenv import load_dotenv
 from fastapi import HTTPException
 import os
+
+from urllib3 import request
 
 def initialize():
     load_dotenv()
@@ -151,8 +154,7 @@ def open_trade(symbol: str, volume: float, order_type: str, sl: float = None, tp
     disconnect()
     if result.retcode != mt5.TRADE_RETCODE_DONE:
         raise RuntimeError(f"Trade failed: {result.comment}")
-    return {"order_id": result.order, "price": price, "volume": volume, "type": order_type}
-
+    return {"ticket": result.order, "price": price, "volume": volume, "type": order_type}
 
 
 def get_open_positions():
@@ -174,6 +176,42 @@ def get_open_positions():
             "time": datetime.fromtimestamp(pos.time).isoformat(),
         })
     return result
+
+def get_pending_orders():
+    ensure_connection()
+    pending_orders = mt5.orders_get()
+
+    if not pending_orders:
+        return {"status": "error", "message": f"Failed to retrieve pending orders: {mt5.last_error()}"}
+
+    if len(pending_orders) == 0:
+        return {"status": "success", "orders": [], "total_pending_orders": 0}
+
+    pending_order_map = {
+            2: "Buy Limit",
+            3: "Sell Limit",
+            4: "Buy Stop",
+            5: "Sell Stop",
+            6: "Buy Stop Limit",
+            7: "Sell Stop Limit",
+            8: "Close By Order"
+        }
+    
+    order_list = []
+    for order in pending_orders:
+        order_type = mt5.ORDER_TYPE_BUY_LIMIT if order.type == 2 else (mt5.ORDER_TYPE_SELL_LIMIT if order.type == 3 else order.type)
+        order_list.append({
+            "ticket": order.ticket,
+            "symbol": order.symbol,
+            "volume": order.volume_initial,
+            "price_open": order.price_open,
+            "order_type": pending_order_map[order_type] if order_type in pending_order_map else "Unknown",
+            "sl": order.sl,
+            "tp": order.tp,
+            "time_setup": datetime.fromtimestamp(order.time_setup)
+        })
+        
+    return {"status": "success", "orders": order_list, "total_pending_orders": len(order_list)}
 
 
 def close_trade(ticket: int):
@@ -261,9 +299,302 @@ def modify_trade(ticket: int, sl=None, tp=None, volume=None):
         return {"success": False, "message": f"Modification failed: {result.comment}"}
     return {"success": True, "message": f"Trade {ticket} modified successfully"}
 
-def cancel_pending_order(order: int):
+def cancel_pending_order(ticket: int):
     ensure_connection()
-    result = mt5.order_delete(order)
+    request = {
+        "action": mt5.TRADE_ACTION_REMOVE,
+        "order": ticket,
+        "comment": "cancel_pending",
+    }
+    result = mt5.order_send(request)
+    print(f'result: {result}'  )
     if not result:
-        return {"success": False, "message": f"Failed to cancel order {order}"}
-    return {"success": True, "message": f"Order {order} cancelled successfully"}
+        return {"success": False, "message": f"Failed to cancel order {ticket}"}
+    return {"success": True, "message": f"Order {ticket} cancelled successfully"}
+
+# services/mt5_service.py (append)
+
+def _pending_order_type_from_str(s: str):
+    """Map string to MT5 pending order type constants."""
+    s = s.lower()
+    mapping = {
+        "buy_limit": mt5.ORDER_TYPE_BUY_LIMIT,
+        "sell_limit": mt5.ORDER_TYPE_SELL_LIMIT,
+        "buy_stop": mt5.ORDER_TYPE_BUY_STOP,
+        "sell_stop": mt5.ORDER_TYPE_SELL_STOP,
+    }
+    return mapping.get(s)
+
+def place_pending_order(symbol: str, order_type_str: str, price: float, volume: float, sl=None, tp=None):
+    """
+    Place a pending order (limit or stop).
+    Returns dict: {"success": True, "message": "Pending order placed", "order": result._asdict()} on success or {"success": False, "message": "Error message"} on error.
+    """
+    ensure_connection()
+
+    if not mt5.symbol_select(symbol, True):
+        return {"success": False, "message": f"Symbol {symbol} not available or not selectable"}
+
+    pending_type = _pending_order_type_from_str(order_type_str)
+    if pending_type is None:
+        return {"success": False, "message": f"Invalid order_type '{order_type_str}'. Use: buy_limit, sell_limit, buy_stop, sell_stop"}
+
+    request = {
+        "action": mt5.TRADE_ACTION_PENDING,
+        "symbol": symbol,
+        "volume": float(volume),
+        "type": pending_type,
+        "price": float(price),
+        "sl": float(sl) if sl is not None else 0.0,
+        "tp": float(tp) if tp is not None else 0.0,
+        "deviation": 20,
+        "magic": 123456,
+        "comment": "pending_api",
+        "type_time": mt5.ORDER_TIME_GTC,
+        "type_filling": mt5.ORDER_FILLING_RETURN,
+    }
+
+    result = mt5.order_send(request)
+    if result is None:
+        return {"success": False, "message": f"Order send failed: {mt5.last_error()}"}
+
+    if result.retcode == mt5.TRADE_RETCODE_DONE:
+        order = {
+            "ticket": result.order,
+            "symbol": symbol,
+            "type": order_type_str,
+            "price": request["price"],
+            "volume": request["volume"],
+            "sl": request["sl"],
+            "tp": request["tp"],
+            "comment": request["comment"],
+        }
+        return {"success": True, "message": "Pending order placed", "order": order}
+
+    return {
+        "success": False,
+        "message": f"Failed to place pending order (retcode={result.retcode})",
+        "error_info": mt5.last_error()
+    }
+
+def modify_pending_order(ticket: int, price: float = None, sl: float = None, tp: float = None, volume: float = None):
+    """
+    Modify an existing pending order (price, SL, TP, volume).
+    Returns dict result with status/message/order.
+    """
+    
+    
+    # Ensure connection is alive
+    if not ensure_connection():
+        return {"success": False, "message": "MetaTrader5 connection failed"}
+
+    # Retrieve the specific pending order
+    orders = mt5.orders_get(ticket=ticket)
+    if orders is None:
+        return {"success": False, "message": f"MT5 API error: {mt5.last_error()}"}
+
+    if not orders:
+        return {"success": False, "message": f"No pending order found for ticket {ticket}"}
+
+    order = orders[0]
+
+    # Ensure it’s not a market order
+    if order.type in (0, 1):  # BUY/SELL
+        return {"success": False, "message": f"Order {ticket} is a market order, not pending"}
+
+    # Normalize zero SL/TP to None
+    sl = None if sl == 0 else sl
+    tp = None if tp == 0 else tp
+
+    # Validate stop levels if both are present
+    if sl is not None and tp is not None and sl >= tp:
+        return {"success": False, "message": "Invalid stops: SL must be less than TP"}
+
+    # Build the modification request
+    request = {
+        "action": mt5.TRADE_ACTION_MODIFY,
+        "order": ticket,
+        "symbol": order.symbol,
+        "price": float(price) if price is not None else order.price_open,
+        "comment": "modified_api",
+    }
+
+    # Only include SL/TP if they’re non-None
+    if sl is not None:
+        request["sl"] = float(sl)
+    if tp is not None:
+        request["tp"] = float(tp)
+    if volume:
+        request["volume"] = float(volume)
+
+    # Send the modification request
+    result = mt5.order_send(request)
+
+    if not result:
+        return {"success": False, "message": f"Modify request failed: {mt5.last_error()}"}
+
+    if hasattr(result, "retcode"):
+        if result.retcode == mt5.TRADE_RETCODE_DONE:
+            order = {
+                "ticket": result.order,
+                "symbol": order.symbol,
+                "type": order.type,
+                "price": request["price"],
+                "volume": request["volume"],
+                "sl": sl if sl is not None else order.sl,
+                "tp": tp if tp is not None else order.tp,
+                "comment": request["comment"],
+        }
+            return {
+                "success": True,
+                "message": f"Pending order {ticket} modified successfully",
+                "order": order,
+            }
+
+        retcodes = {
+            10004: "Invalid volume",
+            10006: "Trade context busy",
+            10016: "Invalid stops",
+            10030: "Invalid request",
+            10031: "Invalid price",
+            10032: "Invalid expiration",
+        }
+
+        readable_error = retcodes.get(result.retcode, "Unknown error")
+        return {
+            "success": False,
+            "message": f"Modify failed ({result.retcode}): {readable_error}",
+            "order": result._asdict(),
+        }
+
+    return {
+        "success": False,
+        "message": f"Unexpected result: {result}",
+    }
+
+
+def make_trade_result(trade, trade_category: str, success: bool, message: str) -> dict:
+    """
+    Helper to construct a consistent result dictionary for each closed trade.
+    """
+    return {
+        "ticket": trade.ticket,
+        "symbol": trade.symbol,
+        "type": trade_category,  # must match schema field name
+        "success": success,
+        "message": message
+    }
+
+
+def bulk_close_orders(filter_criteria: dict):
+    """
+    Close multiple positions or pending orders based on filter criteria.
+    
+    Filter options:
+        symbol: str (e.g., "EURUSD")
+        type: str ("buy", "sell", "pending", "all")
+        status: str ("open", "pending", "all")
+        profit: str ("positive", "negative", "all")
+    """
+    ensure_connection()
+
+    # --- Extract filter criteria ---
+    symbol_filter = filter_criteria.get("symbol", "")
+    trade_type_filter = filter_criteria.get("type", "all").lower()        # buy, sell, pending, all
+    trade_status_filter = filter_criteria.get("status", "open").lower()   # open, pending, all
+    profit_filter = filter_criteria.get("profit", "all").lower()          # positive, negative, all
+
+    # --- Validate symbol ---
+    try:
+        if not symbol_exists(symbol_filter):
+            # Try appending 'm' for brokers like GBPUSDm
+            symbol_filter_with_m = symbol_filter + "m"
+            if symbol_exists(symbol_filter_with_m):
+                symbol_filter = symbol_filter_with_m
+            else:
+                raise HTTPException(status_code=404, detail=f"Symbol '{symbol_filter}' not found on MT5")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    print(f"Applying filters -> symbol: {symbol_filter}, type: {trade_type_filter}, status: {trade_status_filter}, profit: {profit_filter}")
+
+    # --- Retrieve trades ---
+    open_positions = mt5.positions_get() or []
+    pending_orders = mt5.orders_get() or []
+
+    # --- Determine target trades based on status filter ---
+    target_trades = []
+    if trade_status_filter in ("open", "all"):
+        for position in open_positions:
+            target_trades.append(("position", position))
+    if trade_status_filter in ("pending", "all"):
+        for order in pending_orders:
+            target_trades.append(("pending", order))
+
+    results = []
+    closed_count = 0
+
+    # --- Process each trade ---
+    for trade_category, trade in target_trades:
+        print(f"\nProcessing ticket: {trade.ticket}, symbol: {trade.symbol}, category: {trade_category}")
+
+        # --- Symbol filter ---
+        if symbol_filter and trade.symbol != symbol_filter:
+            continue
+
+        # --- Trade type filter ---
+        if trade_type_filter != "all":
+            if trade_category == "position":
+                is_buy_position = trade.type == mt5.ORDER_TYPE_BUY
+                is_sell_position = trade.type == mt5.ORDER_TYPE_SELL
+
+                if trade_type_filter == "buy" and not is_buy_position:
+                    continue
+                if trade_type_filter == "sell" and not is_sell_position:
+                    continue
+            elif trade_category == "pending":
+                is_buy_order = trade.type in (mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_BUY_STOP)
+                is_sell_order = trade.type in (mt5.ORDER_TYPE_SELL_LIMIT, mt5.ORDER_TYPE_SELL_STOP)
+
+                if trade_type_filter == "buy" and not is_buy_order:
+                    continue
+                if trade_type_filter == "sell" and not is_sell_order:
+                    continue
+                if trade_type_filter == "pending" and trade_category != "pending":
+                    continue
+
+        # --- Profit filter (only for positions) ---
+        if profit_filter != "all" and trade_category == "position":
+            if profit_filter == "positive" and trade.profit <= 0:
+                continue
+            if profit_filter == "negative" and trade.profit >= 0:
+                continue
+
+        # --- Execute close/remove action ---
+        if trade_category == "position":
+            result = close_trade(trade.ticket)
+        else:  # pending orders
+            remove_request = {
+                "action": mt5.TRADE_ACTION_REMOVE,
+                "order": trade.ticket,
+                "symbol": trade.symbol
+            }
+            result = mt5.order_send(remove_request)
+
+        # --- Handle result ---
+        print('\n\nresult_retcode:',(result.keys()))
+        print('\n\nresults:', result.values()  )
+        if result and result['message'] == 'success' and mt5.TRADE_RETCODE_DONE == result.get("retcode", mt5.TRADE_RETCODE_DONE):
+            closed_count += 1
+            results.append(make_trade_result(trade, trade_category, True, "Trade closed successfully"))
+        else:
+            results.append(make_trade_result(
+                trade, trade_category, False,
+                f"Failed to close trade: {getattr(result, 'retcode', mt5.last_error())}"
+        ))
+
+    return {
+        "success": closed_count > 0,
+        "message": f"{closed_count}/{len(results)} trades closed successfully",
+        "results": results
+    }

@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from datetime import datetime
 from typing import List, Optional, Literal
 
@@ -105,7 +105,7 @@ class TradeRequest(BaseModel):
 
 
 class TradeResponse(BaseModel):
-    order_id: int
+    ticket: int
     price: float
     volume: float
     type: str
@@ -119,10 +119,7 @@ class ModifyTradeRequest(BaseModel):
     ticket: int = Field(..., example=1234567, description="Trade ticket ID to modify")
     stop_loss: Optional[float] = Field(None, example=1.0950, description="New Stop Loss price")
     take_profit: Optional[float] = Field(None, example=1.1050, description="New Take Profit price")
-    volume: Optional[float] = Field(None, example=0.1, description="New volume in lots")
-
-class CancelOrderRequest(BaseModel):
-    order: int = Field(..., example=654321, description="Pending order ID to cancel")
+    volume: Optional[float] = Field(None, example=0.02, description="New volume/lot size is optional, the field can be empty")
 
 class TradePosition(BaseModel):
     ticket: int
@@ -147,3 +144,93 @@ class AccountInformationResponse(BaseModel):
     margin_level: float
     leverage: int
     currency: str
+
+#Pending orders schemas
+class PendingOrder(BaseModel):
+    ticket: int
+    symbol: str
+    volume: float
+    price_open: float
+    order_type: str
+    sl: float
+    tp: float
+    time_setup: datetime
+#Pending orders response schema
+class PendingOrdersResponse(BaseModel):
+    total_pending_orders: int
+    orders: list[PendingOrder]
+#Create pending order response schema
+class PendingOrderResponse(BaseModel):
+    success: bool
+    message: str
+    order: Optional[dict] = None
+
+class CancelOrderRequest(BaseModel):
+    ticket: int = Field(..., example=654321, description="Pending order ID to cancel")
+
+class PendingOrderCreateRequest(BaseModel):
+    symbol: str = Field(..., example="EURUSD", description="Symbol to place pending order on")
+    order_type: str = Field(..., example="buy_limit",
+                            description="One of: buy_limit, sell_limit, buy_stop, sell_stop")
+    price: float = Field(..., example=1.08450, description="Price at which pending order should be triggered")
+    volume: float = Field(..., gt=0, example=0.1, description="Volume in lots")
+    sl: Optional[float] = Field(None, example=1.08000, description="Optional stop loss price")
+    tp: Optional[float] = Field(None, example=1.09000, description="Optional take profit price")
+    #expiration: Optional[datetime] = Field(None, description="Optional expiration datetime (ISO) for the pending order")
+
+class PendingOrderModifyRequest(BaseModel):
+    ticket: int = Field(..., example=1877501123, description="Pending order ticket to modify")
+    price: Optional[float] = Field(None, example=1.08500, description="New pending order price")
+    sl: Optional[float] = Field(None, example=1.08000, description="New stop loss price")
+    tp: Optional[float] = Field(None, example=1.09000, description="New take profit price")
+    volume: Optional[float] = Field(None, gt=0, example=0.2, description="New volume in lots")
+
+# -------------------- Bulk Operations Schemas --------------------
+
+
+
+#class BulkCloseFilter(BaseModel):
+#    symbols: Optional[List[str]] = None
+#    type: Optional[Literal["buy", "sell", "pending", "all"]] = Field("all")
+#    status: Optional[Literal["open", "pending", "all"]] = Field("open")
+#    profit: Optional[Literal["positive", "negative", "all"]] = Field("all")
+
+
+class BulkCloseFilter(BaseModel):
+    """
+    Filters to select which trades or pending orders to close.
+    All fields are optional and can be combined.
+    """
+
+    symbol: Optional[str] = Field(None, description="Filter by symbol (e.g., BTCUSDm)")
+    type: str = Field("all", description="buy, sell, pending, or all")
+    status: str = Field("open", description="open, pending, or all")
+    profit: str = Field("all", description="positive, negative, or all")
+    class Config:
+        schema_extra = {
+            "example": {
+                "symbol": "BTCUSDm",
+                "type": "buy",
+                "status": "open",
+                "profit": "positive",
+            }
+        }
+
+class BulkCloseResult(BaseModel):
+    """
+    Result for each individual trade or order closed in the bulk operation.
+    """
+    ticket: int = Field(..., description="Ticket (order ID) of the trade or pending order.")
+    symbol: str = Field(..., description="Trading symbol of the closed trade/order.")
+    type: str = Field(..., description="Order type: BUY, SELL, PENDING, etc.")
+    success: bool = Field(..., description="Whether this order was successfully closed.")
+    message: str = Field(..., description="Detailed result or MT5 return code.")
+
+
+class BulkCloseResponse(BaseModel):
+    """
+    Aggregated response for bulk close operation.
+    """
+    success: bool = Field(..., description="True if at least one trade/order closed successfully.")
+    message: str = Field(..., description="Summary of the bulk close operation.")
+    results: List[BulkCloseResult] = Field(..., description="List of individual close results.")
