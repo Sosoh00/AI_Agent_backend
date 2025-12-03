@@ -2,6 +2,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from datetime import datetime
 from typing import List, Optional, Literal
 
+
 class TokenCreate(BaseModel):
     name: str
     username: str
@@ -234,3 +235,61 @@ class BulkCloseResponse(BaseModel):
     success: bool = Field(..., description="True if at least one trade/order closed successfully.")
     message: str = Field(..., description="Summary of the bulk close operation.")
     results: List[BulkCloseResult] = Field(..., description="List of individual close results.")
+
+# ----------------------------
+# Instrument Schemas
+# ----------------------------
+
+class InstrumentBase(BaseModel):
+    symbol: str
+    description: Optional[str] = None
+    session: Optional[str] = None
+    volatility_profile: Optional[str] = None
+    backtest_json: Optional[str] = None
+
+
+class InstrumentCreate(InstrumentBase):
+    pass
+
+
+class InstrumentRead(InstrumentBase):
+    id: int
+    created_at: datetime
+
+    class Config:
+        orm_mode = True
+
+
+# ----------------------------
+# Trade Journal Schemas
+# ----------------------------
+
+class TradeJournalBase(BaseModel):
+    symbol: str
+    direction: str
+    entry_price: float
+    stop_loss: float
+    take_profit_1: Optional[float] = None
+    take_profit_2: Optional[float] = None
+    take_profit_3: Optional[float] = None
+    position_size: float
+    risk_pct: float
+    confidence: float
+    reasoning: str
+    snapshot_json: str
+    sentiment_json: str
+    status: str = "open"
+
+
+class TradeJournalCreate(TradeJournalBase):
+    pass
+
+
+class TradeJournalRead(TradeJournalBase):
+    id: int
+    result_pnl: Optional[float] = None
+    opened_at: datetime
+    closed_at: Optional[datetime] = None
+
+    class Config:
+        orm_mode = True

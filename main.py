@@ -4,6 +4,7 @@ import database
 from contextlib import asynccontextmanager
 from services import mt5_service
 import auth
+from routes import journal, instruments
 
 # ---------- Lifespan ----------
 @asynccontextmanager
@@ -28,6 +29,8 @@ app = FastAPI(
 app.include_router(market.router, dependencies=[Depends(auth.get_current_user)])
 app.include_router(account.router, dependencies=[Depends(auth.get_current_user)])
 app.include_router(trade.router, dependencies=[Depends(auth.get_current_user)])
+app.include_router(instruments.router, dependencies=[Depends(auth.get_current_user)])
+app.include_router(journal.router, dependencies=[Depends(auth.get_current_user)])
 
 # Make the routes public
 #app.include_router(market.router)
